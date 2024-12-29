@@ -86,13 +86,18 @@ class Block(nn.Module):
 
         self.sample_drop_ratio = drop_path
 
-    def forward(self, x: Tensor) -> Tensor:
+
+    def forward(self, x: Tensor, return_attention=False) -> Tensor:
         def attn_residual_func(x: Tensor) -> Tensor:
             return self.ls1(self.attn(self.norm1(x)))
 
         def ffn_residual_func(x: Tensor) -> Tensor:
             return self.ls2(self.mlp(self.norm2(x)))
-
+        
+        # Add this 2 lines
+        if return_attention:
+            return self.attn(self.norm1(x), return_attn=True)
+            
         if self.training and self.sample_drop_ratio > 0.1:
             # the overhead is compensated only for a drop path rate larger than 0.1
             x = drop_add_residual_stochastic_depth(
@@ -207,16 +212,18 @@ def drop_add_residual_stochastic_depth_list(
         outputs.append(add_residual(x, brange, residual, residual_scale_factor, scaling_vector).view_as(x))
     return outputs
 
-
 class NestedTensorBlock(Block):
-    def forward_nested(self, x_list: List[Tensor]) -> List[Tensor]:
+    def forward_nested(self, x_list: List[Tensor], return_attention=False) -> List[Tensor]:
         """
         x_list contains a list of tensors to nest together and run
         """
         assert isinstance(self.attn, MemEffAttention)
 
-        if self.training and self.sample_drop_ratio > 0.0:
+        if return_attention:
+            attn_bias, x = get_attn_bias_and_cat(x_list)
+            return self.attn(self.norm1(x), attn_bias=attn_bias, return_attn=True)
 
+        if self.training and self.sample_drop_ratio > 0.0:
             def attn_residual_func(x: Tensor, attn_bias=None) -> Tensor:
                 return self.attn(self.norm1(x), attn_bias=attn_bias)
 
@@ -237,7 +244,6 @@ class NestedTensorBlock(Block):
             )
             return x_list
         else:
-
             def attn_residual_func(x: Tensor, attn_bias=None) -> Tensor:
                 return self.ls1(self.attn(self.norm1(x), attn_bias=attn_bias))
 
@@ -249,12 +255,11 @@ class NestedTensorBlock(Block):
             x = x + ffn_residual_func(x)
             return attn_bias.split(x)
 
-    def forward(self, x_or_x_list):
+    def forward(self, x_or_x_list, return_attention=False):
         if isinstance(x_or_x_list, Tensor):
-            return super().forward(x_or_x_list)
+            return super().forward(x_or_x_list, return_attention)
         elif isinstance(x_or_x_list, list):
-            if not XFORMERS_AVAILABLE:
-                raise AssertionError("xFormers is required for using nested tensors")
-            return self.forward_nested(x_or_x_list)
+            assert XFORMERS_AVAILABLE, "Please install xFormers for nested tensors usage"
+            return self.forward_nested(x_or_x_list, return_attention)
         else:
             raise AssertionError
